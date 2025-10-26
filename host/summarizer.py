@@ -53,7 +53,7 @@ def summarize_weather(user_query: str, city_name: str, data: Any, style_prompt: 
         return _fallback_spanish_text(user_query, city_name, data)
 
     system = style_prompt or (
-        "Redacta en español claro y conciso un breve reporte del clima. "
+        "Redacta en español claro un reporte del clima. "
         "Incluye temperatura máxima y mínima si hay pronóstico diario, o temperatura actual y viento si es tiempo real. "
         "No inventes datos; usa solo los del JSON."
     )

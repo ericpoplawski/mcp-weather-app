@@ -29,7 +29,7 @@ log = setup_logger("host.app")
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("MCP Weather — LLM-only (sin fallbacks)")
+        self.title("MCP Weather — LLM-only")
         self.geometry("600x200")
         self.minsize(500, 200)
 
@@ -57,7 +57,7 @@ class App(tk.Tk):
 
         bottom = ttk.Frame(self, padding=(10,0,10,10)); bottom.grid(row=1, column=0, sticky="nsew")
         bottom.rowconfigure(1, weight=1); bottom.columnconfigure(0, weight=1)
-        ttk.Label(bottom, text="Salida (humana):").grid(row=0, column=0, sticky="w")
+        ttk.Label(bottom, text="Pronóstico:").grid(row=0, column=0, sticky="w")
         self.text_output = tk.Text(bottom, wrap="word"); self.text_output.grid(row=1, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(bottom, orient="vertical", command=self.text_output.yview)
         scroll.grid(row=1, column=1, sticky="ns")

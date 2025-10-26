@@ -8,10 +8,9 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List
 
-import httpx
 from fastmcp import FastMCP
 
-# ---- logging server ----
+# ---------- logging ----------
 LOG_FILE = Path(__file__).resolve().parent / "mcp_server.log"
 logger = logging.getLogger("server.mcp")
 logger.setLevel(logging.DEBUG)
@@ -21,8 +20,12 @@ if not any(isinstance(h, RotatingFileHandler) for h in logger.handlers):
     fh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s"))
     logger.addHandler(fh)
 
-GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
-FORECAST_URL  = "https://api.open-meteo.com/v1/forecast"
+# ---------- providers (separados) ----------
+from providers.geocoding_provider import GeocodingProvider
+from providers.forecast_provider import ForecastProvider
+
+geocoder = GeocodingProvider()     # timeout configurable por env GEOCODING_TIMEOUT
+forecaster = ForecastProvider()    # timeout configurable por env FORECAST_TIMEOUT
 
 app = FastMCP("weather-mcp-server")
 
@@ -30,25 +33,20 @@ def _safe_float(x: Any) -> float | None:
     try: return float(x)
     except Exception: return None
 
-# ================ IMPLEMENTACIONES ================
+# ================== IMPLEMENTACIONES ==================
 async def search_city_impl(name: str, count: int = 1) -> List[Dict[str, Any]]:
-    logger.info(f"tool(search_city) args name={name} count={count}")
+    logger.info(f"tool(search_city) name={name!r} count={count}")
     if not name or not name.strip():
         return []
-    count = max(1, min(int(count), 10))
-    params = {"name": name.strip(), "count": count, "language": "en", "format": "json"}
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(GEOCODING_URL, params=params)
-            resp.raise_for_status()
-            data = resp.json()
-            logger.debug(f"search_city raw={json.dumps(data, ensure_ascii=False)[:2000]}")
+        raw = await geocoder.search(name.strip(), count=max(1, min(int(count), 10)), language="en")
+        logger.debug(f"geocoding_raw={json.dumps(raw, ensure_ascii=False)[:2000]}")
     except Exception as e:
         logger.exception(f"search_city_impl error: {e}")
         return [{"error": f"geocoding_failed: {e}"}]
 
     results = []
-    for item in data.get("results", []) or []:
+    for item in (raw.get("results") or []):
         results.append({
             "name": item.get("name"),
             "country": item.get("country"),
@@ -58,35 +56,26 @@ async def search_city_impl(name: str, count: int = 1) -> List[Dict[str, Any]]:
             "timezone": item.get("timezone"),
             "population": item.get("population"),
         })
-    logger.debug(f"search_city results={json.dumps(results, ensure_ascii=False)[:2000]}")
     return results
 
 async def get_weather_impl(lat: float, lon: float, timezone: str = "auto") -> Dict[str, Any]:
-    logger.info(f"tool(get_weather) args lat={lat} lon={lon} tz={timezone}")
+    logger.info(f"tool(get_weather) lat={lat} lon={lon} tz={timezone!r}")
     lat = _safe_float(lat); lon = _safe_float(lon)
     if lat is None or lon is None:
         return {"error": "invalid_coordinates"}
-    params = {
-        "latitude": lat, "longitude": lon, "current_weather": "true",
-        "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m", "timezone": timezone or "auto",
-    }
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(FORECAST_URL, params=params)
-            resp.raise_for_status()
-            data = resp.json()
-            logger.debug(f"get_weather raw={json.dumps(data, ensure_ascii=False)[:2000]}")
+        raw = await forecaster.current(lat, lon, timezone=timezone or "auto")
+        logger.debug(f"forecast_current_raw={json.dumps(raw, ensure_ascii=False)[:2000]}")
     except Exception as e:
         logger.exception(f"get_weather_impl error: {e}")
         return {"error": f"forecast_failed: {e}"}
 
-    current = data.get("current_weather") or {}
-    hourly  = data.get("hourly") or {}
-    units   = data.get("hourly_units") or {}
-
-    out = {
+    current = raw.get("current_weather") or {}
+    hourly  = raw.get("hourly") or {}
+    units   = raw.get("hourly_units") or {}
+    return {
         "coordinates": {"lat": lat, "lon": lon},
-        "timezone": data.get("timezone"),
+        "timezone": raw.get("timezone"),
         "current": {
             "time": current.get("time"),
             "temperature": current.get("temperature"),
@@ -106,34 +95,25 @@ async def get_weather_impl(lat: float, lon: float, timezone: str = "auto") -> Di
             },
         },
     }
-    logger.debug(f"get_weather out={json.dumps(out, ensure_ascii=False)[:2000]}")
-    return out
 
 async def get_forecast_daily_impl(lat: float, lon: float, days: int = 2, timezone: str = "auto") -> Dict[str, Any]:
-    logger.info(f"tool(get_forecast_daily) args lat={lat} lon={lon} days={days} tz={timezone}")
+    logger.info(f"tool(get_forecast_daily) lat={lat} lon={lon} days={days} tz={timezone!r}")
     lat = _safe_float(lat); lon = _safe_float(lon)
     if lat is None or lon is None:
         return {"error": "invalid_coordinates"}
     days = max(1, min(int(days), 7))
-    params = {
-        "latitude": lat, "longitude": lon, "timezone": timezone or "auto",
-        "daily": "weathercode,temperature_2m_max,temperature_2m_min,precipitation_sum",
-    }
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(FORECAST_URL, params=params)
-            resp.raise_for_status()
-            data = resp.json()
-            logger.debug(f"get_forecast_daily raw={json.dumps(data, ensure_ascii=False)[:2000]}")
+        raw = await forecaster.daily(lat, lon, timezone=timezone or "auto")
+        logger.debug(f"forecast_daily_raw={json.dumps(raw, ensure_ascii=False)[:2000]}")
     except Exception as e:
         logger.exception(f"get_forecast_daily_impl error: {e}")
         return {"error": f"forecast_failed: {e}"}
 
-    daily = data.get("daily") or {}
-    units = data.get("daily_units") or {}
+    daily = raw.get("daily") or {}
+    units = raw.get("daily_units") or {}
     out = {
         "coordinates": {"lat": lat, "lon": lon},
-        "timezone": data.get("timezone"),
+        "timezone": raw.get("timezone"),
         "days": [],
         "units": {"tmax": units.get("temperature_2m_max", "°C"),
                   "tmin": units.get("temperature_2m_min", "°C"),
@@ -152,10 +132,9 @@ async def get_forecast_daily_impl(lat: float, lon: float, days: int = 2, timezon
             "precipitation_sum": precs[i] if i < len(precs) else None,
             "weathercode": codes[i] if i < len(codes) else None,
         })
-    logger.debug(f"get_forecast_daily out={json.dumps(out, ensure_ascii=False)[:2000]}")
     return out
 
-# ================ TOOLS MCP ================
+# ================== TOOLS MCP ==================
 @app.tool(name="search_city")
 async def search_city_tool(name: str, count: int = 1) -> List[Dict[str, Any]]:
     return await search_city_impl(name, count)
@@ -168,18 +147,7 @@ async def get_weather_tool(lat: float, lon: float, timezone: str = "auto") -> Di
 async def get_forecast_daily_tool(lat: float, lon: float, days: int = 2, timezone: str = "auto") -> Dict[str, Any]:
     return await get_forecast_daily_impl(lat, lon, days, timezone)
 
-# ================ RESOURCE ================
-@app.resource("memory://capabilities", name="capabilities", mime_type="application/json")
-async def capabilities_resource() -> str:
-    spec = {"tools": {
-        "search_city": {"args": {"name": "str", "count": "int<=10"}},
-        "get_weather": {"args": {"lat": "float", "lon": "float", "timezone": "str|'auto'"}},
-        "get_forecast_daily": {"args": {"lat": "float", "lon": "float", "days": "1..7", "timezone": "str|'auto'"}},
-    }}
-    logger.info("read_resource(capabilities)")
-    return json.dumps(spec, ensure_ascii=False, indent=2)
-
-# ================ PROMPT (@app.prompt) ================
+# ================== PROMPT (se mantiene para demo) ==================
 @app.prompt(name="es_summary_style")
 async def es_summary_style() -> str:
     return (
@@ -188,7 +156,7 @@ async def es_summary_style() -> str:
         "Usa unidades del JSON. No inventes datos ni agregues lugares comunes."
     )
 
-# ================ MAIN ================
+# ================== MAIN ==================
 def run_stdio_blocking() -> None:
     if sys.platform.startswith("win"):
         try:
