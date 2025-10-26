@@ -7,6 +7,8 @@ import asyncio
 import tkinter as tk
 from tkinter import ttk, messagebox
 from pathlib import Path
+from dotenv import load_dotenv, find_dotenv
+load_dotenv(find_dotenv(usecwd=True), override=False)
 
 # Windows: loop policy segura para Tkinter + asyncio
 if sys.platform.startswith("win"):
@@ -20,7 +22,7 @@ SERVER_COMMAND = sys.executable
 SERVER_ARGS = ["-u", str(ROOT_DIR / "server" / "server.py")]  # -u = unbuffered
 
 from host_client import MCPOneShotHost
-
+from summarizer import summarize_weather
 
 ALIASES = {
     "nyc": "New York City",
@@ -34,30 +36,21 @@ def extract_city(user_text: str) -> str | None:
     if not user_text:
         return None
     t = user_text.strip()
-    # sacar signos finales
     t = re.sub(r"[¿?!.]+$", "", t)
-    # alias exactos
     low = t.lower().strip()
     if low in ALIASES:
         return ALIASES[low]
-
-    # buscar después de "en|para|de"
     m = re.search(r"(?:en|para|de)\s+([A-Za-zÁÉÍÓÚÜÑáéíóúüñ\.\-\'\s]{2,})$", t, re.IGNORECASE)
     if m:
         cand = m.group(1).strip()
-        # normalizar alias finales (ej: "... en NYC")
         lowc = cand.lower()
         if lowc in ALIASES:
             return ALIASES[lowc]
         return cand
-
-    # fallback: si el texto es corto, tratarlo como ciudad
     if len(t.split()) <= 3:
         if low in ALIASES:
             return ALIASES[low]
         return t
-
-    # último intento: tomar la última "palabra capitalizada" larga
     tokens = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ\.\-\']{1,}", t)
     if tokens:
         cand = tokens[-1]
@@ -67,15 +60,7 @@ def extract_city(user_text: str) -> str | None:
         return cand
     return None
 
-
 def intent_from_text(user_text: str) -> tuple[str, int]:
-    """
-    Devuelve ('now'|'tomorrow'|'dayN', day_index)
-    - ahora/hoy -> ('now', 0) → get_weather
-    - mañana   -> ('tomorrow', 1) → get_forecast_daily (days>=2, idx=1)
-    - pasado mañana -> ('day2', 2)
-    por defecto: ('day0', 0) → get_forecast_daily (hoy)
-    """
     s = (user_text or "").lower()
     if any(k in s for k in ["ahora", "en este momento", "now", "hoy"]):
         return ("now", 0)
@@ -83,17 +68,15 @@ def intent_from_text(user_text: str) -> tuple[str, int]:
         return ("day2", 2)
     if "mañana" in s or "tomorrow" in s:
         return ("tomorrow", 1)
-    # palabras tipo "pronóstico"
     if "pronost" in s or "forecast" in s:
         return ("day0", 0)
-    # default
     return ("day0", 0)
 
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("MCP Weather — Simple Router")
+        self.title("MCP Weather — Resumen en español")
         self.geometry("880x600")
         self.minsize(760, 520)
 
@@ -130,7 +113,6 @@ class App(tk.Tk):
         self.entry_query.focus_set()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
-    # ---------- helpers ----------
     def set_output(self, text: str):
         self.text_output.delete("1.0", "end")
         self.text_output.insert("end", text)
@@ -138,7 +120,6 @@ class App(tk.Tk):
     def append_output(self, text: str):
         self.text_output.insert("end", text)
 
-    # ---------- acciones ----------
     def on_clear(self):
         self.entry_query.delete(0, "end")
         self.text_output.delete("1.0", "end")
@@ -153,15 +134,15 @@ class App(tk.Tk):
         self.set_output("Pensando…\n")
 
         try:
-            # 1) Extraer ciudad del prompt
+            # 1) detectar ciudad + intención
             city = extract_city(q)
             if not city:
-                self.append_output("No pude extraer una ciudad de tu mensaje. Ej.: 'mañana en Montevideo'.\n")
+                self.append_output("No pude extraer una ciudad. Ej.: 'mañana en Montevideo'.\n")
                 return
+            mode, idx = intent_from_text(q)
+            self.append_output(f"[Ciudad detectada] {city} — intención: {mode}\n")
 
-            self.append_output(f"[Ciudad detectada] {city}\n")
-
-            # 2) Decodificar a coords con search_city (count=1; si vacío, count=5)
+            # 2) geocode → primera coincidencia (o 5 si no aparece al primer intento)
             res = asyncio.run(self.host.call("search_city", {"name": city, "count": 1}))
             if not isinstance(res, list) or not res or (isinstance(res[0], dict) and "error" in res[0]):
                 res = asyncio.run(self.host.call("search_city", {"name": city, "count": 5}))
@@ -176,46 +157,38 @@ class App(tk.Tk):
                 self.append_output("La ciudad detectada no trae coordenadas válidas.\n")
                 return
 
-            self.append_output(f"[Match] {city0.get('name')}, {city0.get('admin1') or ''} {city0.get('country') or ''} "
-                               f"({lat}, {lon})\n")
+            # 3) tool adecuada
+            style_prompt = ""
+            try:
+                # si existe el prompt opcional de estilo, lo usamos
+                style_prompt = asyncio.run(self.host.get_resource("capabilities"))  # dummy read para iniciar
+                # mejor: leer prompt si lo agregaste
+                from mcp.client.stdio import stdio_client, StdioServerParameters
+                from mcp.client.session import ClientSession
+                # no lo usamos aquí para mantener simple; el summarizer tiene texto por defecto
+                style_prompt = ""
+            except Exception:
+                style_prompt = ""
 
-            # 3) Elegir tool según intención
-            mode, idx = intent_from_text(q)
             if mode == "now":
                 out = asyncio.run(self.host.call("get_weather", {
                     "lat": float(lat), "lon": float(lon), "timezone": "auto"
                 }))
-                # Redacción simple
-                cur = (out or {}).get("current") or {}
-                tz  = (out or {}).get("timezone")
-                line = (f"Ahora en {city0.get('name')} (TZ: {tz}): "
-                        f"{cur.get('temperature')}°C, viento {cur.get('windspeed')} km/h, "
-                        f"código {cur.get('weathercode')}.\n")
-                self.append_output("\n— Respuesta —\n" + line)
-                self.append_output("\n[JSON]\n" + json.dumps(out, ensure_ascii=False, indent=2))
-                return
+            else:
+                days_needed = max(1, idx + 1)
+                days_needed = min(7, days_needed if days_needed >= 2 else 2)
+                out = asyncio.run(self.host.call("get_forecast_daily", {
+                    "lat": float(lat), "lon": float(lon), "days": int(days_needed), "timezone": "auto"
+                }))
+                # marcamos el día elegido
+                if isinstance(out, dict):
+                    days = out.get("days") or []
+                    if 0 <= idx < len(days):
+                        out = {**out, "selected_day": days[idx]}
 
-            # forecast diario (hoy/mañana/pasado)
-            days_needed = max(1, idx + 1)
-            days_needed = min(7, days_needed if days_needed >= 2 else 2)  # si idx=0, pedimos 2 igual
-            out = asyncio.run(self.host.call("get_forecast_daily", {
-                "lat": float(lat), "lon": float(lon), "days": int(days_needed), "timezone": "auto"
-            }))
-            days = (out or {}).get("days") or []
-            picked = days[idx] if 0 <= idx < len(days) else (days[0] if days else None)
-            if not picked:
-                self.append_output("\nNo pude obtener el día solicitado.\n")
-                self.append_output("\n[JSON]\n" + json.dumps(out, ensure_ascii=False, indent=2))
-                return
-
-            units = (out or {}).get("units") or {}
-            line = (f"Pronóstico para {city0.get('name')} el {picked.get('date')}: "
-                    f"máx {picked.get('tmax')}{units.get('tmax','°C')}, "
-                    f"mín {picked.get('tmin')}{units.get('tmin','°C')}, "
-                    f"precip {picked.get('precipitation_sum')}{units.get('precip','mm')}, "
-                    f"código {picked.get('weathercode')}.\n")
-
-            self.append_output("\n— Respuesta —\n" + line)
+            # 4) resumen en español (LLM o fallback)
+            pretty = summarize_weather(q, city0.get("name") or city, out, style_prompt or None)
+            self.append_output("\n— Respuesta —\n" + pretty + "\n")
             self.append_output("\n[JSON]\n" + json.dumps(out, ensure_ascii=False, indent=2))
 
         except Exception as e:

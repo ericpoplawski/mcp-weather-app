@@ -161,7 +161,7 @@ async def get_forecast_daily_tool(lat: float, lon: float, days: int = 2, timezon
     return await get_forecast_daily_impl(lat, lon, days, timezone)
 
 
-# ================ RESOURCE (opcional para doc) ================
+# ================ RESOURCE (opcional) ================
 @app.resource("memory://capabilities", name="capabilities", mime_type="application/json")
 async def capabilities_resource() -> str:
     spec = {
@@ -172,6 +172,15 @@ async def capabilities_resource() -> str:
         }
     }
     return json.dumps(spec, ensure_ascii=False, indent=2)
+
+
+# ================ PROMPT (opcional para estilo) ================
+@app.prompt(name="es_summary_style")
+async def es_summary_style() -> str:
+    return (
+        "Redacta en español claro y conciso. Explica temperatura máxima y mínima, probables precipitaciones y viento si aplica. "
+        "No inventes datos; usa solo los del JSON."
+    )
 
 
 # ================ MAIN ================
