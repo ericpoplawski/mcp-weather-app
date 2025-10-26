@@ -11,29 +11,23 @@ Incluye dos componentes principales:
 ## 🧩 Requisitos previos
 1. **Python 3.11 o superior** instalado en el sistema.
 2. **Conexión a Internet** (para acceder a la API pública de Open-Meteo).
-3. **Sistema operativo:** Windows (probado en Windows 10 y 11).
+3. **Sistema operativo:** Windows (probado en Windows 10 y 11) y MacOs (Sonoma 14.7.5).
 
 ---
 
 ## ⚙️ Configuración inicial
 
-1) **Clonar o descargar el proyecto**
-```bash
-git clone https://github.com/usuario/mcp-weather-app.git
-cd mcp-weather-app
-```
-
-2) **Crear entorno virtual (solo la primera vez)**
+1) **Crear entorno virtual (solo la primera vez)**
 ```bash
 python -m venv .venv
 ```
 
-3) **Activar el entorno virtual**
+2) **Activar el entorno virtual**
 ```bash
 .venv\Scripts\activate
 ```
 
-4) **Instalar dependencias**
+3) **Instalar dependencias**
 ```bash
 pip install -r requirements.txt
 ```

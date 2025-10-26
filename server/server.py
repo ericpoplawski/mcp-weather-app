@@ -3,18 +3,16 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-import traceback
 from typing import Any, Dict, List
-from pathlib import Path
 
 import httpx
 from fastmcp import FastMCP
 
 GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
-FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+FORECAST_URL  = "https://api.open-meteo.com/v1/forecast"
 
 app = FastMCP("weather-mcp-server")
-LOG_FILE = Path(__file__).resolve().parent / "mcp_server_error.log"
+
 
 def _safe_float(x: Any) -> float | None:
     try:
@@ -22,34 +20,41 @@ def _safe_float(x: Any) -> float | None:
     except Exception:
         return None
 
-# ================== IMPLEMENTACIONES (para CLI y tools) ==================
-async def search_city_impl(name: str, count: int = 5) -> List[Dict[str, Any]]:
+
+# ================ IMPLEMENTACIONES ================
+async def search_city_impl(name: str, count: int = 1) -> List[Dict[str, Any]]:
+    """Decodifica nombre de ciudad → [ {name,country,admin1,lat,lon,timezone,population?} ]"""
     if not name or not name.strip():
         return []
     count = max(1, min(int(count), 10))
     params = {"name": name.strip(), "count": count, "language": "en", "format": "json"}
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(GEOCODING_URL, params=params)
-        resp.raise_for_status()
-        data = resp.json()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(GEOCODING_URL, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        return [{"error": f"geocoding_failed: {e}"}]
+
     results = []
     for item in data.get("results", []) or []:
-        results.append(
-            {
-                "name": item.get("name"),
-                "country": item.get("country"),
-                "admin1": item.get("admin1"),
-                "lat": _safe_float(item.get("latitude")),
-                "lon": _safe_float(item.get("longitude")),
-                "timezone": item.get("timezone"),
-            }
-        )
+        results.append({
+            "name": item.get("name"),
+            "country": item.get("country"),
+            "admin1": item.get("admin1"),
+            "lat": _safe_float(item.get("latitude")),
+            "lon": _safe_float(item.get("longitude")),
+            "timezone": item.get("timezone"),
+            "population": item.get("population"),
+        })
     return results
 
+
 async def get_weather_impl(lat: float, lon: float, timezone: str = "auto") -> Dict[str, Any]:
+    """Clima actual + preview de horas."""
     lat = _safe_float(lat); lon = _safe_float(lon)
     if lat is None or lon is None:
-        return {"error": "Invalid coordinates"}
+        return {"error": "invalid_coordinates"}
     params = {
         "latitude": lat,
         "longitude": lon,
@@ -57,13 +62,18 @@ async def get_weather_impl(lat: float, lon: float, timezone: str = "auto") -> Di
         "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m",
         "timezone": timezone or "auto",
     }
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(FORECAST_URL, params=params)
-        resp.raise_for_status()
-        data = resp.json()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(FORECAST_URL, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        return {"error": f"forecast_failed: {e}"}
+
     current = data.get("current_weather") or {}
-    hourly = data.get("hourly") or {}
-    units = data.get("hourly_units") or {}
+    hourly  = data.get("hourly") or {}
+    units   = data.get("hourly_units") or {}
+
     return {
         "coordinates": {"lat": lat, "lon": lon},
         "timezone": data.get("timezone"),
@@ -87,51 +97,91 @@ async def get_weather_impl(lat: float, lon: float, timezone: str = "auto") -> Di
         },
     }
 
-# ================== REGISTRO DE TOOLS MCP ==================
+
+async def get_forecast_daily_impl(lat: float, lon: float, days: int = 2, timezone: str = "auto") -> Dict[str, Any]:
+    """Pronóstico diario (tmax/tmin, precipitación, weathercode)."""
+    lat = _safe_float(lat); lon = _safe_float(lon)
+    if lat is None or lon is None:
+        return {"error": "invalid_coordinates"}
+    days = max(1, min(int(days), 7))
+
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "timezone": timezone or "auto",
+        "daily": "weathercode,temperature_2m_max,temperature_2m_min,precipitation_sum",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(FORECAST_URL, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        return {"error": f"forecast_failed: {e}"}
+
+    daily = data.get("daily") or {}
+    units = data.get("daily_units") or {}
+    out = {
+        "coordinates": {"lat": lat, "lon": lon},
+        "timezone": data.get("timezone"),
+        "days": [],
+        "units": {
+            "tmax": units.get("temperature_2m_max", "°C"),
+            "tmin": units.get("temperature_2m_min", "°C"),
+            "precip": units.get("precipitation_sum", "mm"),
+        }
+    }
+    times = (daily.get("time") or [])[:days]
+    tmaxs = (daily.get("temperature_2m_max") or [])[:days]
+    tmins = (daily.get("temperature_2m_min") or [])[:days]
+    precs = (daily.get("precipitation_sum") or [])[:days]
+    codes = (daily.get("weathercode") or [])[:days]
+    for i, dt in enumerate(times):
+        out["days"].append({
+            "date": dt,
+            "tmax": tmaxs[i] if i < len(tmaxs) else None,
+            "tmin": tmins[i] if i < len(tmins) else None,
+            "precipitation_sum": precs[i] if i < len(precs) else None,
+            "weathercode": codes[i] if i < len(codes) else None,
+        })
+    return out
+
+
+# ================ TOOLS MCP ================
 @app.tool(name="search_city")
-async def search_city_tool(name: str, count: int = 5) -> List[Dict[str, Any]]:
+async def search_city_tool(name: str, count: int = 1) -> List[Dict[str, Any]]:
     return await search_city_impl(name, count)
 
 @app.tool(name="get_weather")
 async def get_weather_tool(lat: float, lon: float, timezone: str = "auto") -> Dict[str, Any]:
     return await get_weather_impl(lat, lon, timezone)
 
-# ================== ENTRADAS ==================
+@app.tool(name="get_forecast_daily")
+async def get_forecast_daily_tool(lat: float, lon: float, days: int = 2, timezone: str = "auto") -> Dict[str, Any]:
+    return await get_forecast_daily_impl(lat, lon, days, timezone)
+
+
+# ================ RESOURCE (opcional para doc) ================
+@app.resource("memory://capabilities", name="capabilities", mime_type="application/json")
+async def capabilities_resource() -> str:
+    spec = {
+        "tools": {
+            "search_city": {"args": {"name": "str", "count": "int<=10"}},
+            "get_weather": {"args": {"lat": "float", "lon": "float", "timezone": "str|'auto'"}},
+            "get_forecast_daily": {"args": {"lat": "float", "lon": "float", "days": "1..7", "timezone": "str|'auto'"}},
+        }
+    }
+    return json.dumps(spec, ensure_ascii=False, indent=2)
+
+
+# ================ MAIN ================
 def run_stdio_blocking() -> None:
-    """Arranca el servidor MCP por stdio (fastmcp.run elige el transporte)."""
     if sys.platform.startswith("win"):
         try:
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         except Exception:
             pass
-    # fastmcp usa .run() (no existe run_stdio en tu versión)
-    app.run()
-
-async def _cli_test_search(q: str) -> None:
-    res = await search_city_impl(q)
-    print(json.dumps(res, indent=2, ensure_ascii=False))
-
-async def _cli_test_weather(lat: float, lon: float) -> None:
-    res = await get_weather_impl(lat, lon)
-    print(json.dumps(res, indent=2, ensure_ascii=False))
-
-def _print_help() -> None:
-    print(
-        "Usage:\n"
-        "  python server.py               # run as MCP stdio server\n"
-        "  python server.py test-search <city>\n"
-        "  python server.py test-weather <lat> <lon>\n"
-    )
+    app.run(transport="stdio")
 
 if __name__ == "__main__":
-    if len(sys.argv) == 1:
-        # stdio mode
-        run_stdio_blocking()
-    else:
-        cmd = sys.argv[1]
-        if cmd == "test-search" and len(sys.argv) >= 3:
-            asyncio.run(_cli_test_search(" ".join(sys.argv[2:])))
-        elif cmd == "test-weather" and len(sys.argv) == 4:
-            asyncio.run(_cli_test_weather(float(sys.argv[2]), float(sys.argv[3])))
-        else:
-            _print_help()
+    run_stdio_blocking()

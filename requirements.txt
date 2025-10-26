@@ -1,3 +1,4 @@
 fastmcp
-httpx
 mcp
+httpx
+openai>=1.40.0

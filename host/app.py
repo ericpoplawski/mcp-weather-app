@@ -1,254 +1,230 @@
 # host/app.py
-import asyncio
-import json
+import os
 import sys
-import traceback
+import re
+import json
+import asyncio
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import ttk, messagebox
 from pathlib import Path
 
-# ---- Compatibilidad Windows ----
+# Windows: loop policy segura para Tkinter + asyncio
 if sys.platform.startswith("win"):
     try:
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     except Exception:
         pass
 
-# ---- MCP ----
-from mcp.client.stdio import stdio_client, StdioServerParameters
-from mcp.client.session import ClientSession
-
 ROOT_DIR = Path(__file__).resolve().parents[1]
 SERVER_COMMAND = sys.executable
 SERVER_ARGS = ["-u", str(ROOT_DIR / "server" / "server.py")]  # -u = unbuffered
 
-# --------------------------------------------------------------
-# Normalizador robusto del resultado MCP -> dict/list/str
-# --------------------------------------------------------------
-def normalize_mcp_result(result):
-    # Caso 0: a veces ya es un dict con {"type":"text","text":"..."}
-    if isinstance(result, dict):
-        # Si parece un wrapper de contenido de texto, extraemos el .text y lo parseamos
-        if result.get("type") == "text" and "text" in result:
-            txt = result.get("text")
-            try:
-                return json.loads(txt)  # intentamos parsear a list/dict
-            except Exception:
-                return txt  # si no es JSON válido devolvemos el texto
-        # Si no es wrapper, ya es el dato "real"
-        return result
+from host_client import MCPOneShotHost
 
-    # Caso 1: si es list ya está normalizado
-    if isinstance(result, list):
-        return result
 
-    # Caso 2: SDK con objetos pydantic (BaseModel) que traen .content
-    content = getattr(result, "content", None)
-    if content:
-        for item in content:
-            # --- Pydantic v2: model_dump_json() ---
-            mdj = getattr(item, "model_dump_json", None)
-            if callable(mdj):
-                try:
-                    s = mdj()
-                    return json.loads(s)
-                except Exception:
-                    return s
+ALIASES = {
+    "nyc": "New York City",
+    "new york": "New York City",
+    "cdmx": "Ciudad de México",
+    "baires": "Buenos Aires",
+}
 
-            # --- Pydantic v1: json() ---
-            j = getattr(item, "json", None)
-            if callable(j):
-                try:
-                    s = j()
-                    return json.loads(s)
-                except Exception:
-                    return s
+def extract_city(user_text: str) -> str | None:
+    """Heurística simple para quedarse con la ciudad del prompt."""
+    if not user_text:
+        return None
+    t = user_text.strip()
+    # sacar signos finales
+    t = re.sub(r"[¿?!.]+$", "", t)
+    # alias exactos
+    low = t.lower().strip()
+    if low in ALIASES:
+        return ALIASES[low]
 
-            # --- Texto plano ---
-            txt = getattr(item, "text", None)
-            if txt is not None:
-                try:
-                    return json.loads(txt)
-                except Exception:
-                    return txt
+    # buscar después de "en|para|de"
+    m = re.search(r"(?:en|para|de)\s+([A-Za-zÁÉÍÓÚÜÑáéíóúüñ\.\-\'\s]{2,})$", t, re.IGNORECASE)
+    if m:
+        cand = m.group(1).strip()
+        # normalizar alias finales (ej: "... en NYC")
+        lowc = cand.lower()
+        if lowc in ALIASES:
+            return ALIASES[lowc]
+        return cand
 
-            # --- Valor genérico ---
-            if hasattr(item, "value"):
-                val = getattr(item, "value")
-                try:
-                    return json.loads(val) if isinstance(val, str) else val
-                except Exception:
-                    return val
+    # fallback: si el texto es corto, tratarlo como ciudad
+    if len(t.split()) <= 3:
+        if low in ALIASES:
+            return ALIASES[low]
+        return t
 
-    # Último recurso: convertir a str e intentar json
-    try:
-        return json.loads(str(result))
-    except Exception:
-        return str(result)
+    # último intento: tomar la última "palabra capitalizada" larga
+    tokens = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ\.\-\']{1,}", t)
+    if tokens:
+        cand = tokens[-1]
+        lowc = cand.lower()
+        if lowc in ALIASES:
+            return ALIASES[lowc]
+        return cand
+    return None
 
-    
-def unwrap_text_wrapper(x):
-    # Si viene como {"type":"text","text":"..."} sacamos el texto y lo parseamos
-    if isinstance(x, dict) and x.get("type") == "text" and "text" in x:
-        txt = x["text"]
-        try:
-            return json.loads(txt)  # lista/dict real
-        except Exception:
-            return txt              # si no es JSON válido, devolvemos texto
-    return x
 
-# --------------------------------------------------------------
-# Llamada MCP
-# --------------------------------------------------------------
-async def mcp_call(tool_name: str, arguments: dict):
-    params = StdioServerParameters(
-        command=SERVER_COMMAND,
-        args=SERVER_ARGS,
-        cwd=str(ROOT_DIR),
-        env={"PYTHONUNBUFFERED": "1"},
-    )
-    async with stdio_client(params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
+def intent_from_text(user_text: str) -> tuple[str, int]:
+    """
+    Devuelve ('now'|'tomorrow'|'dayN', day_index)
+    - ahora/hoy -> ('now', 0) → get_weather
+    - mañana   -> ('tomorrow', 1) → get_forecast_daily (days>=2, idx=1)
+    - pasado mañana -> ('day2', 2)
+    por defecto: ('day0', 0) → get_forecast_daily (hoy)
+    """
+    s = (user_text or "").lower()
+    if any(k in s for k in ["ahora", "en este momento", "now", "hoy"]):
+        return ("now", 0)
+    if "pasado mañana" in s or "day after tomorrow" in s:
+        return ("day2", 2)
+    if "mañana" in s or "tomorrow" in s:
+        return ("tomorrow", 1)
+    # palabras tipo "pronóstico"
+    if "pronost" in s or "forecast" in s:
+        return ("day0", 0)
+    # default
+    return ("day0", 0)
 
-            # (Opcional) validar tool
-            try:
-                tools = await session.list_tools()
-                names = {t.name for t in tools}
-                if tool_name not in names:
-                    raise RuntimeError(f"La tool '{tool_name}' no está registrada. Tools: {sorted(names)}")
-            except Exception:
-                pass
 
-            raw = await session.call_tool(tool_name, arguments)
-            return normalize_mcp_result(raw)
-
-# --------------------------------------------------------------
-# GUI
-# --------------------------------------------------------------
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("MCP Weather Host")
-        self.geometry("720x520")
-        self.resizable(False, False)
+        self.title("MCP Weather — Simple Router")
+        self.geometry("880x600")
+        self.minsize(760, 520)
 
-        # Buscar
-        f1 = ttk.Frame(self, padding=10); f1.pack(fill="x")
-        ttk.Label(f1, text="Ciudad:").pack(side="left")
-        self.entry_city = ttk.Entry(f1, width=30); self.entry_city.pack(side="left", padx=6)
-        self.btn_search = ttk.Button(f1, text="Buscar", command=self.on_search); self.btn_search.pack(side="left")
+        self.host = MCPOneShotHost(
+            command=SERVER_COMMAND,
+            args=SERVER_ARGS,
+            cwd=str(ROOT_DIR),
+            env={"PYTHONUNBUFFERED": "1"},
+        )
 
-        # Resultados
-        f2 = ttk.Frame(self, padding=(10,0,10,10)); f2.pack(fill="both", expand=True)
-        cols = ("name","country","admin1","lat","lon","tz")
-        self.tree = ttk.Treeview(f2, columns=cols, show="headings", height=10)
-        for c,label,w in [("name","Ciudad",140),("country","País",120),("admin1","Estado/Depto",160),
-                          ("lat","Lat",80),("lon","Lon",80),("tz","Timezone",120)]:
-            self.tree.heading(c, text=label); self.tree.column(c, width=w)
-        self.tree.pack(fill="both", expand=True)
-        self.cities = []
+        # ---------- UI ----------
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
 
-        # Acción
-        f3 = ttk.Frame(self, padding=10); f3.pack(fill="x")
-        self.btn_weather = ttk.Button(f3, text="Ver clima de la ciudad seleccionada", command=self.on_get_weather)
-        self.btn_weather.pack(side="left")
+        top = ttk.Frame(self, padding=10); top.grid(row=0, column=0, sticky="ew")
+        top.columnconfigure(1, weight=1)
 
-        # Salida
-        f4 = ttk.Frame(self, padding=10); f4.pack(fill="both", expand=True)
-        ttk.Label(f4, text="Salida:").pack(anchor="w")
-        self.text_output = tk.Text(f4, height=10); self.text_output.pack(fill="both", expand=True)
+        ttk.Label(top, text="Pregunta:").grid(row=0, column=0, padx=(0,8), sticky="w")
+        self.entry_query = ttk.Entry(top); self.entry_query.grid(row=0, column=1, sticky="ew", padx=(0,8))
+        self.entry_query.insert(0, "¿Cómo va a estar mañana en NYC?")
 
-    def set_output(self, obj):
+        self.btn_send  = ttk.Button(top, text="Enviar",  command=self.on_send);  self.btn_send.grid(row=0, column=2, padx=(0,6))
+        self.btn_clear = ttk.Button(top, text="Limpiar", command=self.on_clear); self.btn_clear.grid(row=0, column=3)
+        self.entry_query.bind("<Return>", lambda e: self.on_send())
+
+        bottom = ttk.Frame(self, padding=(10,0,10,10)); bottom.grid(row=1, column=0, sticky="nsew")
+        bottom.rowconfigure(1, weight=1); bottom.columnconfigure(0, weight=1)
+        ttk.Label(bottom, text="Salida:").grid(row=0, column=0, sticky="w")
+        self.text_output = tk.Text(bottom, wrap="word"); self.text_output.grid(row=1, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(bottom, orient="vertical", command=self.text_output.yview)
+        scroll.grid(row=1, column=1, sticky="ns")
+        self.text_output.configure(yscrollcommand=scroll.set)
+
+        self.entry_query.focus_set()
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    # ---------- helpers ----------
+    def set_output(self, text: str):
         self.text_output.delete("1.0", "end")
-        if isinstance(obj, (dict, list)):
-            self.text_output.insert("end", json.dumps(obj, indent=2, ensure_ascii=False))
-        else:
-            self.text_output.insert("end", str(obj))
+        self.text_output.insert("end", text)
 
-    # ---- Handlers ----
-    def on_search(self):
-        city = self.entry_city.get().strip()
-        if not city:
-            messagebox.showwarning("Atención", "Ingresá un nombre de ciudad."); return
-        self.btn_search.config(state="disabled"); self.set_output("Buscando ciudades...")
+    def append_output(self, text: str):
+        self.text_output.insert("end", text)
+
+    # ---------- acciones ----------
+    def on_clear(self):
+        self.entry_query.delete(0, "end")
+        self.text_output.delete("1.0", "end")
+
+    def on_send(self):
+        q = self.entry_query.get().strip()
+        if not q:
+            messagebox.showwarning("Atención", "Escribí tu pregunta.")
+            return
+
+        self.btn_send.config(state="disabled")
+        self.set_output("Pensando…\n")
+
         try:
-            asyncio.run(self._search_async(city))
-        finally:
-            self.btn_search.config(state="normal")
+            # 1) Extraer ciudad del prompt
+            city = extract_city(q)
+            if not city:
+                self.append_output("No pude extraer una ciudad de tu mensaje. Ej.: 'mañana en Montevideo'.\n")
+                return
 
-    async def _search_async(self, city: str):
-        try:
-            res = await mcp_call("search_city", {"name": city, "count": 5})
-            res = unwrap_text_wrapper(res)
-            if isinstance(res, str):
-                try:
-                    res = json.loads(res)
-                except Exception:
-                    pass
+            self.append_output(f"[Ciudad detectada] {city}\n")
 
-            # res DEBE ser una lista de ciudades; si vino como str JSON, intentar parseo
-            if isinstance(res, str):
-                try:
-                    res = json.loads(res)
-                except Exception:
-                    pass
+            # 2) Decodificar a coords con search_city (count=1; si vacío, count=5)
+            res = asyncio.run(self.host.call("search_city", {"name": city, "count": 1}))
+            if not isinstance(res, list) or not res or (isinstance(res[0], dict) and "error" in res[0]):
+                res = asyncio.run(self.host.call("search_city", {"name": city, "count": 5}))
 
-            # poblar tabla
-            for i in self.tree.get_children(): self.tree.delete(i)
-            self.cities = []
-            if isinstance(res, list):
-                for item in res:
-                    self.cities.append(item)
-                    self.tree.insert("", "end", values=(
-                        item.get("name"),
-                        item.get("country"),
-                        item.get("admin1"),
-                        item.get("lat"),
-                        item.get("lon"),
-                        item.get("timezone"),
-                    ))
-            self.set_output(res)
+            if not isinstance(res, list) or not res:
+                self.append_output("No encontré esa ciudad en la base de datos.\n")
+                return
+
+            city0 = res[0]
+            lat, lon = city0.get("lat"), city0.get("lon")
+            if lat is None or lon is None:
+                self.append_output("La ciudad detectada no trae coordenadas válidas.\n")
+                return
+
+            self.append_output(f"[Match] {city0.get('name')}, {city0.get('admin1') or ''} {city0.get('country') or ''} "
+                               f"({lat}, {lon})\n")
+
+            # 3) Elegir tool según intención
+            mode, idx = intent_from_text(q)
+            if mode == "now":
+                out = asyncio.run(self.host.call("get_weather", {
+                    "lat": float(lat), "lon": float(lon), "timezone": "auto"
+                }))
+                # Redacción simple
+                cur = (out or {}).get("current") or {}
+                tz  = (out or {}).get("timezone")
+                line = (f"Ahora en {city0.get('name')} (TZ: {tz}): "
+                        f"{cur.get('temperature')}°C, viento {cur.get('windspeed')} km/h, "
+                        f"código {cur.get('weathercode')}.\n")
+                self.append_output("\n— Respuesta —\n" + line)
+                self.append_output("\n[JSON]\n" + json.dumps(out, ensure_ascii=False, indent=2))
+                return
+
+            # forecast diario (hoy/mañana/pasado)
+            days_needed = max(1, idx + 1)
+            days_needed = min(7, days_needed if days_needed >= 2 else 2)  # si idx=0, pedimos 2 igual
+            out = asyncio.run(self.host.call("get_forecast_daily", {
+                "lat": float(lat), "lon": float(lon), "days": int(days_needed), "timezone": "auto"
+            }))
+            days = (out or {}).get("days") or []
+            picked = days[idx] if 0 <= idx < len(days) else (days[0] if days else None)
+            if not picked:
+                self.append_output("\nNo pude obtener el día solicitado.\n")
+                self.append_output("\n[JSON]\n" + json.dumps(out, ensure_ascii=False, indent=2))
+                return
+
+            units = (out or {}).get("units") or {}
+            line = (f"Pronóstico para {city0.get('name')} el {picked.get('date')}: "
+                    f"máx {picked.get('tmax')}{units.get('tmax','°C')}, "
+                    f"mín {picked.get('tmin')}{units.get('tmin','°C')}, "
+                    f"precip {picked.get('precipitation_sum')}{units.get('precip','mm')}, "
+                    f"código {picked.get('weathercode')}.\n")
+
+            self.append_output("\n— Respuesta —\n" + line)
+            self.append_output("\n[JSON]\n" + json.dumps(out, ensure_ascii=False, indent=2))
+
         except Exception as e:
-            tb = traceback.format_exc()
-            messagebox.showerror("Error", f"Falló la búsqueda:\n{e}\n\nDetalle:\n{tb}")
-
-    def on_get_weather(self):
-        sel = self.tree.focus()
-        if not sel:
-            messagebox.showinfo("Info", "Seleccioná una ciudad de la lista."); return
-        idx = self.tree.index(sel)
-        if idx >= len(self.cities):
-            messagebox.showerror("Error", "No se pudo resolver la ciudad seleccionada."); return
-        city = self.cities[idx]; lat, lon = city.get("lat"), city.get("lon")
-        if lat is None or lon is None:
-            messagebox.showerror("Error", "La ciudad no trae coordenadas."); return
-        self.btn_weather.config(state="disabled"); self.set_output(f"Obteniendo clima para {city.get('name')} ({lat}, {lon})...")
-        try:
-            asyncio.run(self._weather_async(lat, lon))
+            messagebox.showerror("Error", f"No se pudo resolver la consulta:\n{e}")
         finally:
-            self.btn_weather.config(state="normal")
+            self.btn_send.config(state="normal")
 
-    async def _weather_async(self, lat: float, lon: float):
-        try:
-            res = await mcp_call("get_weather", {"lat": float(lat), "lon": float(lon), "timezone": "auto"})
-            res = unwrap_text_wrapper(res)
-            if isinstance(res, str):
-                try:
-                    res = json.loads(res)
-                except Exception:
-                    pass
-
-            # Si vino como string JSON, parseamos
-            if isinstance(res, str):
-                try:
-                    res = json.loads(res)
-                except Exception:
-                    pass
-            self.set_output(res)
-        except Exception as e:
-            tb = traceback.format_exc()
-            messagebox.showerror("Error", f"Falló la consulta de clima:\n{e}\n\nDetalle:\n{tb}")
+    def on_close(self):
+        self.destroy()
 
 
 if __name__ == "__main__":
