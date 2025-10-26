@@ -78,6 +78,7 @@ class App(tk.Tk):
         self.entry_query.delete(0, "end")
         self.text_output.delete(1.0, "end")
 
+
     def on_send(self):
         q = self.entry_query.get().strip()
         if not q:
@@ -98,12 +99,51 @@ class App(tk.Tk):
             city, day_index = infer_city_and_dayindex(q)
             log.info(f"llm_extracted city={city} day_index={day_index}")
 
-            # 2) geocode via MCP (tomamos la PRIMERA coincidencia a propósito — sin desambiguación)
-            res = asyncio.run(self.host.call("search_city", {"name": city, "count": 1}))
+
+            # 2) geocode via MCP (pedimos hasta 10 coincidencias)
+            res = asyncio.run(self.host.call("search_city", {"name": city, "count": 10}))
             if not isinstance(res, list) or not res or (isinstance(res[0], dict) and "error" in res[0]):
                 raise RuntimeError(f"No se encontró la ciudad '{city}' en geocodificación.")
 
-            pick = res[0]
+            # Si hay más de una coincidencia, mostrar selección
+            pick = None
+            if len(res) == 1:
+                pick = res[0]
+            else:
+                # Mostrar ventana de selección
+                options = []
+                for i, item in enumerate(res):
+                    name = item.get("name", "?")
+                    admin1 = item.get("admin1", "")
+                    country = item.get("country", "")
+                    options.append(f"{name} ({admin1}, {country})")
+
+                def select_city():
+                    idx = lb.curselection()
+                    if not idx:
+                        messagebox.showwarning("Atención", "Seleccioná una ciudad de la lista.")
+                        return
+                    nonlocal pick
+                    pick = res[idx[0]]
+                    sel_win.destroy()
+
+                sel_win = tk.Toplevel(self)
+                sel_win.title("Selecciona la ciudad")
+                sel_win.geometry("400x300")
+                tk.Label(sel_win, text="Selecciona la ciudad correcta:").pack(pady=8)
+                lb = tk.Listbox(sel_win, height=min(10, len(options)), selectmode=tk.SINGLE)
+                for opt in options:
+                    lb.insert(tk.END, opt)
+                lb.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
+                btn = tk.Button(sel_win, text="Elegir", command=select_city)
+                btn.pack(pady=8)
+                sel_win.transient(self)
+                sel_win.grab_set()
+                self.wait_window(sel_win)
+                if pick is None:
+                    self.set_output("No se seleccionó ninguna ciudad.\n")
+                    return
+
             lat, lon = pick.get("lat"), pick.get("lon")
             if lat is None or lon is None:
                 raise RuntimeError("La ciudad detectada no trae coordenadas válidas.")

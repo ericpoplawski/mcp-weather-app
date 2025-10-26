@@ -62,7 +62,7 @@ def summarize_weather(user_query: str, city_name: str, data: Any, style_prompt: 
         {"role": "user", "content": f"Pregunta: {user_query}\nCiudad: {city_name}\nJSON:\n{json.dumps(data, ensure_ascii=False)}"}
     ]
     resp = openai.chat.completions.create(
-        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        model=os.getenv("OPENAI_MODEL", "gpt-3.5-turbo"),
         messages=messages,
         temperature=0.2,
     )
