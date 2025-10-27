@@ -1,4 +1,3 @@
-# host/host_client.py
 from __future__ import annotations
 import json
 import time
@@ -7,7 +6,7 @@ from typing import Any, Optional
 from mcp.client.stdio import stdio_client, StdioServerParameters
 from mcp.client.session import ClientSession
 
-from logging_setup import setup_logger
+from services.logging_setup import setup_logger
 log = setup_logger("host.client")
 
 def _normalize_mcp_result(result: Any) -> Any:
@@ -92,13 +91,11 @@ class MCPOneShotHost:
     async def get_prompt(self, name: str) -> str:
         """
         Lee un prompt MCP por nombre, soportando shapes distintos de list_prompts().
-        SIN fallback a estilos locales (si falla, devuelve "") — el caller decide si aborta.
         """
         t0 = time.perf_counter()
         async with stdio_client(self._params) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
-                # Intento directo
                 try:
                     prompt = await session.read_prompt(name)
                     msgs = getattr(prompt, "messages", prompt)

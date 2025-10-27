@@ -1,4 +1,3 @@
-# host/llm_router.py
 from __future__ import annotations
 import os
 import json
@@ -14,6 +13,7 @@ if not OPENAI_API_KEY:
 
 openai.api_key = OPENAI_API_KEY
 
+
 def infer_city_and_dayindex(user_text: str) -> Tuple[str, int]:
     """
     Usa LLM (function calling) para extraer ciudad e intención temporal.
@@ -28,7 +28,7 @@ def infer_city_and_dayindex(user_text: str) -> Tuple[str, int]:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "city":   {"type": "string", "description": "Nombre de la ciudad, ej: 'Buenos Aires'."},
+                    "city": {"type": "string", "description": "Nombre de la ciudad, ej: 'Buenos Aires'."},
                     "intent": {"type": "string", "enum": ["now", "today", "tomorrow", "day_after_tomorrow"]},
                 },
                 "required": ["city"]

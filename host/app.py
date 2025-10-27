@@ -1,4 +1,3 @@
-# host/app.py
 import sys
 import asyncio
 import tkinter as tk
@@ -7,7 +6,6 @@ from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv(usecwd=True), override=False)
 
-# Windows: loop policy para Tkinter + asyncio
 if sys.platform.startswith("win"):
     try:
         import asyncio as _asyncio
@@ -20,16 +18,16 @@ SERVER_COMMAND = sys.executable
 SERVER_ARGS = ["-u", str(ROOT_DIR / "server" / "server.py")]  # -u = unbuffered
 
 from host_client import MCPOneShotHost
-from summarizer import summarize_weather
-from logging_setup import setup_logger
-from llm_router import infer_city_and_dayindex
+from services.summarizer import summarize_weather
+from services.logging_setup import setup_logger
+from services.llm_router import infer_city_and_dayindex
 
 log = setup_logger("host.app")
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("MCP Weather — LLM-only")
+        self.title("MCP Weather App")
         self.geometry("600x200")
         self.minsize(500, 200)
 
@@ -90,12 +88,12 @@ class App(tk.Tk):
         log.info(f"user_query: {q}")
 
         try:
-            # 0) prompt de estilo del server (si no existe, seguimos igual; no es fallback de LLM)
+            # 0) prompt de estilo del server
             style_prompt = asyncio.run(self.host.get_prompt("es_summary_style"))
             if style_prompt:
                 log.info("prompt_used: es_summary_style")
 
-            # 1) LLM: ciudad + day_index (SIN FALLBACKS)
+            # 1) LLM: ciudad + day_index
             city, day_index = infer_city_and_dayindex(q)
             log.info(f"llm_extracted city={city} day_index={day_index}")
 
@@ -167,7 +165,7 @@ class App(tk.Tk):
                     raise RuntimeError("El pronóstico no contiene el día solicitado por el LLM.")
                 data_for_summary = {**out, "selected_day": days[day_index]}
 
-            # 4) Redacción con LLM (SIN fallback)
+            # 4) Redacción con LLM
             pretty = summarize_weather(q, pick.get("name") or city, data_for_summary, style_prompt or None)
             self.append_output("\n— Respuesta —\n" + pretty + "\n")
 

@@ -1,4 +1,3 @@
-# server/server.py
 from __future__ import annotations
 import asyncio
 import json
@@ -20,7 +19,7 @@ if not any(isinstance(h, RotatingFileHandler) for h in logger.handlers):
     fh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s"))
     logger.addHandler(fh)
 
-# ---------- providers (separados) ----------
+# ---------- providers ----------
 from providers.geocoding_provider import GeocodingProvider
 from providers.forecast_provider import ForecastProvider
 
